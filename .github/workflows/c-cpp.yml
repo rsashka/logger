@@ -13,8 +13,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    - name: make
-      run: make
     - name: make CONF=UnitTest
       run: make CONF=UnitTest
     - name: test
