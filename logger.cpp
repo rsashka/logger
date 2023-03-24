@@ -1,8 +1,13 @@
-#include <stdio.h>
+//#include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
 
+
 #include <contrib/logger/logger.h>
+
+/*
+  Use ring_buffer from https://github.com/KonstantinChizhov/Mcucpp.git
+*/
 #include <contrib/logger/mcucpp/ring_buffer.h>
 
 
@@ -23,6 +28,7 @@ using namespace utils;
 #endif
 
 static Mcucpp::Containers::RingBufferPO2<LOG_BUFFER_SIZE, char> m_log_buffer;
+Logger * Logger::m_instance = nullptr;
 
 const char * Logger::AddString(LogLevelType level, const char * str, bool flush) {
     if(m_func != nullptr) {
@@ -32,7 +38,9 @@ const char * Logger::AddString(LogLevelType level, const char * str, bool flush)
         m_log_buffer.pop_front();
     }
     const char *result = nullptr;
-    if(!m_log_buffer.empty()) {
+    if(m_log_buffer.empty()) {
+        result = &m_log_buffer[0];
+    } else {
         result = &m_log_buffer[m_log_buffer.size() - 1];
     }
     while(*str) {
@@ -100,10 +108,8 @@ EXTERN_C const char * log_printf(uint8_t level, const char *prefix, const char *
     }
 
     const char * result = nullptr;
-    size_t pos_end;
     if(prefix) {
-        pos_end = snprintf(buffer, LOG_MAX_BUFFER_SIZE, "%s", prefix);
-        buffer[pos_end] = '\0';
+        snprintf(buffer, LOG_MAX_BUFFER_SIZE, "%s", prefix);
         result = Logger::Instance()->AddString(level, buffer, false);
     }
 
@@ -120,20 +126,28 @@ EXTERN_C const char * log_printf(uint8_t level, const char *prefix, const char *
 
     va_list args;
     va_start(args, format);
-    pos_end = vsnprintf(buffer, LOG_MAX_BUFFER_SIZE, format, args);
+    vsnprintf(buffer, LOG_MAX_BUFFER_SIZE, format, args);
     va_end(args);
 
-    buffer[pos_end] = '\0';
+    size_t size = strlen(buffer);
+    bool nl = true;
+    if(size >= 2) {
+        // После сообщения заканчивающегося на \r\r не ставить перевод строки
+        if(buffer[size - 2] == '\r' && buffer[size - 1] == '\r') {
+            nl = false;
+            buffer[size - 2] = '\0';
+        }
+    }
+
     Logger::Instance()->AddString(level, buffer, false);
 
-    if(file && (level != LOG_LEVEL_INFO || Logger::Instance()->GetLogLevel() >= LOG_LEVEL_DEBUG)) {
+    if(file && (level != LOG_LEVEL_INFO || Logger::Instance()->GetLogLevel() >= LOG_LEVEL_DUMP)) {
         const char * file_name = strrchr(file, '/');
-        pos_end = snprintf(buffer, LOG_MAX_BUFFER_SIZE, " (%s:%d)\n", ((file_name && *file_name == '/') ? file_name + 1 : file), line);
+        snprintf(buffer, LOG_MAX_BUFFER_SIZE, " (%s:%d)%s", ((file_name && *file_name == '/') ? file_name + 1 : file), line, nl ? "\n" : "");
 
     } else {
-        pos_end = snprintf(buffer, LOG_MAX_BUFFER_SIZE, "\n");
+        snprintf(buffer, LOG_MAX_BUFFER_SIZE, "%s", nl ? "\n" : "");
     }
-    buffer[pos_end] = '\0';
     const char * tmp = Logger::Instance()->AddString(level, buffer, true);
     if(!result) {
         result = tmp;
@@ -155,26 +169,26 @@ EXTERN_C uint8_t HexToByte(const char c) {
     return 0;
 }
 
-EXTERN_C size_t HexToBin(const char * str, uint8_t * buffer, const size_t size) {
+EXTERN_C size_t HexToBin(const char * str, uint8_t * buf, const size_t size) {
     ASSERT(str != nullptr);
-    ASSERT(buffer != nullptr);
+    ASSERT(buf != nullptr);
     //    ASSERT((strlen(str) % 2) == 0);
 
-    memset(buffer, 0, size);
+    memset(buf, 0, size);
 
     size_t pos = 0;
     size_t count = std::min(strlen(str), size * 2);
 
     while(pos < count) {
-        buffer[pos / 2] = (uint8_t) ((HexToByte(str[pos]) << 4) | (HexToByte(str[pos + 1])));
+        buf[pos / 2] = (uint8_t) ((HexToByte(str[pos]) << 4) | (HexToByte(str[pos + 1])));
         pos += 2;
     }
     return pos / 2;
 }
 
-EXTERN_C int HexToBinEq(const char * str, const uint8_t * buffer, size_t size) {
+EXTERN_C int HexToBinEq(const char * str, const uint8_t * buf, size_t size) {
     ASSERT(str);
-    ASSERT(buffer);
+    ASSERT(buf);
     //    ASSERT(strlen(str) % 2 == 0);
 
     size_t len = strlen(str);
@@ -184,7 +198,7 @@ EXTERN_C int HexToBinEq(const char * str, const uint8_t * buffer, size_t size) {
     for (size_t pos = 0; pos < len; pos += 2) {
         uint8_t byte = (uint8_t) ((HexToByte(str[pos]) << 4) | (HexToByte(str[pos + 1])));
 
-        if(byte != buffer[pos / 2]) {
+        if(byte != buf[pos / 2]) {
             return false;
         }
     }
@@ -193,18 +207,18 @@ EXTERN_C int HexToBinEq(const char * str, const uint8_t * buffer, size_t size) {
 
 static const char bin_to_hex_chars[] = "0123456789ABCDEF";
 
-EXTERN_C std::string BinToHex(const uint8_t * buffer, const size_t size) {
+std::string BinToHex(const uint8_t * buf, const size_t size) {
     std::string result;
     result.resize(size * 2);
     //    const char hex[] = "0123456789ABCDEF";
     for (size_t i = 0; i < size; i++) {
-        result[i * 2] = bin_to_hex_chars[buffer[i] >> 4];
-        result[i * 2 + 1] = bin_to_hex_chars[buffer[i] & 0xf];
+        result[i * 2] = bin_to_hex_chars[buf[i] >> 4];
+        result[i * 2 + 1] = bin_to_hex_chars[buf[i] & 0xf];
     }
     return result;
 }
 
-EXTERN_C std::string HexStrToBinStr(std::string & hex_str) {
+std::string HexStrToBinStr(std::string & hex_str) {
     std::string result;
     for (size_t pos = 0; pos < hex_str.size(); pos++) {
         if(pos != 0) {
@@ -274,16 +288,16 @@ EXTERN_C std::string HexStrToBinStr(std::string & hex_str) {
     return result;
 }
 
-EXTERN_C size_t BinToHexBuffer(const uint8_t * buffer, const size_t size, char * str, const size_t str_size) {
-    ASSERT(buffer);
+EXTERN_C size_t BinToHexBuffer(const uint8_t * buf, const size_t size, char * str, const size_t str_size) {
+    ASSERT(buf);
     ASSERT(str);
-    if(!str || !buffer || !size || !str_size) {
+    if(!str || !buf || !size || !str_size) {
         return 0;
     }
     size_t max_size = std::min(size * 2, str_size - 1);
     for (size_t i = 0; i < size && (i * 2 < max_size); i++) {
-        str[i * 2] = bin_to_hex_chars[buffer[i] >> 4];
-        str[i * 2 + 1] = bin_to_hex_chars[buffer[i] & 0xf];
+        str[i * 2] = bin_to_hex_chars[buf[i] >> 4];
+        str[i * 2 + 1] = bin_to_hex_chars[buf[i] & 0xf];
     }
     str[max_size] = '\0';
     return max_size;
@@ -294,7 +308,7 @@ EXTERN_C size_t BinToHexBuffer(const uint8_t * buffer, const size_t size, char *
 #include <execinfo.h>
 #include <cxxabi.h>
 
-inline char * basename(char * str) {
+inline const char * get_basename(const char * str) {
     if(str) {
         size_t pos = strlen(str);
         while(pos) {
@@ -349,10 +363,10 @@ EXTERN_C void log_print_callstack() {
                 strncat(function, "()", sz);
                 function[sz - 1] = '\0';
             }
-            LOG_INFO("    %s:%s", basename(stack_strings[i]), basename(function));
+            LOG_INFO("    %s:%s", get_basename(stack_strings[i]), get_basename(function));
         } else {
             // didn't find the mangled name, just print the whole line
-            LOG_INFO("    %s", basename(stack_strings[i]));
+            LOG_INFO("    %s", get_basename(stack_strings[i]));
         }
         free(function);
     }
